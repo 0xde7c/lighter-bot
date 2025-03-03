@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
 """
-RSI Bot v9.2 — 5m Momentum Scalper (RSI(7) + VWAP)
+RSI Bot v10 — Simplified RSI Scalper (RSI(7) + VWAP)
 
-Strategy: 5m RSI(7) momentum + VWAP directional filter + 15m trend filter.
-  1. 5m RSI(7) from Lighter REST API (fast response for 5m scalping)
-  2. Entry: RSI delta (direction) + price move confirmation (momentum)
-  3. VWAP directional filter (only long above VWAP, only short below)
-  4. 15m RSI trend filter (only blocks extremes)
-  5. 0.40% SL on exchange (2% limit padding — guaranteed fill)
-  6. 3-tier trailing stop for exits
-  7. RSI-based exits (profit, stall, fail)
-  8. Whale flow confirmation + protection
+Strategy: 3 checks only — RSI zone + RSI turning + VWAP.
+  1. 5m RSI(7) from Lighter REST API
+  2. Entry: RSI in zone (< 35 or > 65) + RSI turning (Δ1.5 from 90s trough) + VWAP filter
+  3. 0.40% SL on exchange (2% limit padding — guaranteed fill)
+  4. Single-tier trailing stop (activate 0.30%, distance 0.15%)
+  5. RSI profit exit (opposite zone + profit > 0)
 
 Safety: SL always on exchange, position sync, no naked positions, no double orders
 """
@@ -33,63 +30,47 @@ TG_TOKEN="8536956116:AAGOWByFex_n1wraFuGFwf7e5YPVe2Vyegw"; TG_CHAT="5583279698"
 
 BASE_AMOUNT = 150  # 0.0015 BTC (~$100 notional, ~$2 margin at 50x)
 
-# ── 5m RSI MOMENTUM STRATEGY (from Lighter REST API) ─────────────────────
+# ── 5m RSI STRATEGY (from Lighter REST API) ──────────────────────────────
 RSI_PERIOD = 7                 # faster response for 5m scalping
 LIGHTER_CANDLE_URL = "https://mainnet.zklighter.elliot.ai/api/v1/candles"
 CANDLE_FETCH_COUNT = 200       # 200 candles — plenty for RSI + VWAP
 
-# Entry zones: where 5m RSI must be to enter
-RSI_LONG_ZONE_LOW = 20         # allow longs from oversold
-RSI_LONG_ZONE_HIGH = 45        # allow longs below midline
-RSI_SHORT_ZONE_LOW = 55        # allow shorts above midline
-RSI_SHORT_ZONE_HIGH = 80       # allow shorts from overbought
+# Entry zones: simplified — oversold/overbought only
+RSI_LONG_MAX = 40              # long when RSI < 40 (oversold)
+RSI_SHORT_MIN = 60             # short when RSI > 60 (overbought)
 
-# RSI delta: confirms direction (RSI must be moving our way)
-RSI_MIN_DELTA = 3.0            # min RSI change over lookback period
-RSI_DELTA_LOOKBACK = 600       # 10 min (~2 candles) lookback for RSI direction
+# RSI turning: confirms reversal from trough/peak in last 90s
+RSI_TURN_DELTA = 1.0           # min RSI rise from trough (long) or fall from peak (short)
+RSI_TURN_WINDOW = 120          # seconds to look back for trough/peak
 
-# Price move confirmation: filters out noise, only trades during real moves
-MIN_PRICE_MOVE_PCT = 0.10      # min 0.10% price range in last 60s
+# RSI-based exits — profit only
+RSI_LONG_PROFIT_EXIT = 60      # take profit when RSI hits opposite zone
+RSI_SHORT_PROFIT_EXIT = 40     # take profit when RSI hits opposite zone
 
-# 15m RSI trend filter — trade WITH the trend, not against it
-RSI_15M_SHORT_MAX = 60         # don't short when 15m RSI > 60 (uptrend)
-RSI_15M_LONG_MIN = 40          # don't long when 15m RSI < 40 (downtrend)
-
-# RSI-based exits
-RSI_LONG_PROFIT_EXIT = 65      # take profit when RSI hits this and turns down
-RSI_SHORT_PROFIT_EXIT = 35     # take profit when RSI hits this and turns up
-RSI_LONG_FAIL = 25             # thesis failed — cut loss (less extreme for 5m)
-RSI_SHORT_FAIL = 75            # thesis failed — cut loss (less extreme for 5m)
-RSI_STALL_MIN_HOLD = 300       # detect stalls after 5 min (let trades develop)
-RSI_STALL_MIN_PROFIT = 0.0020  # only stall-exit if profit >= 0.20% (meaningful)
+# Volume spike — relaxes RSI zones during high-volume moves
+VOL_SPIKE_WINDOW = 60          # seconds to measure recent volume
+VOL_SPIKE_LOOKBACK = 600       # seconds for average volume baseline
+VOL_SPIKE_MULTIPLIER = 3.0     # recent must be 3x average to count as spike
+VOL_SPIKE_ZONE_RELAX = 10      # relax RSI zones by 10 pts during spike (40/60 → 50/50)
+VOL_BIG_SPIKE_MULTIPLIER = 5.0 # 5x average = big spike, bypasses RSI zone entirely
 
 # RSI poll interval — fetch fresh 5m candles from Lighter API
-RSI_POLL_INTERVAL = 30         # seconds between Lighter API candle fetches
+RSI_POLL_INTERVAL = 20         # seconds between Lighter API candle fetches
 
 # ── EXITS ────────────────────────────────────────────────────────────────
-SL_PCT = 0.0040                # 0.40% SL (wider for 5m moves)
+SL_PCT = 0.0040                # 0.40% SL
 HARD_STOP_PCT = 0.0050         # 0.50% hard stop backstop
-TRAIL_ACTIVATE_PCT = 0.0040    # 0.40% to activate trail (let it run first)
-TRAIL_DISTANCE_PCT = 0.0015    # 0.15% trail distance (keep more profit)
-TRAIL_MID_ACTIVATE = 0.0070    # 0.70%+ profit → mid tier
-TRAIL_MID_DISTANCE = 0.0020    # 0.20% mid trail distance
-TRAIL_TIGHT_ACTIVATE = 0.0100  # 1.00%+ profit → lock it in
-TRAIL_TIGHT_DISTANCE = 0.0010  # 0.10% tight trail
+TRAIL_ACTIVATE_PCT = 0.0030    # 0.30% to activate trail (faster than v9's 0.40%)
+TRAIL_DISTANCE_PCT = 0.0015    # 0.15% trail distance (single tier)
 MAX_HOLD_SECS = 900            # 15 min normal
-TRAIL_MAX_HOLD_SECS = 1800     # 30 min trailing
+TRAIL_MAX_HOLD_SECS = 1200     # 20 min trailing (was 30 in v9)
 LOCK_DURATION = 450
 
-# ── WHALE FLOW ───────────────────────────────────────────────────────────
-WHALE_MIN_BTC = 2.0
-WHALE_CONFIRM_WINDOW = 15
-WHALE_BLOCK_WINDOW = 10
-WHALE_TIGHTEN_TRAIL_PCT = 0.0003
-
 # ── COOLDOWNS ────────────────────────────────────────────────────────────
-MIN_TRADE_INTERVAL = 60        # 60s between trades (5m candles = slower pace)
+MIN_TRADE_INTERVAL = 45        # 45s between trades
 LOSS_COOLDOWN_SECS = 60        # pause after loss
 LOSS_STREAK_COOLDOWN = 300     # 5 min after 3 losses
-MAX_TRADES_HOUR = 10           # hard cap (5m = fewer trades)
+MAX_TRADES_HOUR = 15           # raised from 10 (more signals expected)
 DAILY_LOSS_LIMIT = 2.0
 
 # ── KEPT FOR OB LOGGING ─────────────────────────────────────────────────
@@ -98,9 +79,9 @@ SMOOTH_TICKS = 10; LOOKBACK_TICKS = 30
 
 EXIT_SETTLE_SECS = 5
 
-STATE_FILE="/root/rsi_bot/.bot_state_v9.json"
-LOCK_FILE="/root/rsi_bot/.entry_lock_v9"
-LOCAL_POS_FILE="/root/rsi_bot/.local_position_v9.json"
+STATE_FILE="/root/rsi_bot/.bot_state_v10.json"
+LOCK_FILE="/root/rsi_bot/.entry_lock_v10"
+LOCAL_POS_FILE="/root/rsi_bot/.local_position_v10.json"
 TRADE_LOG_FILE="/root/rsi_bot/trade_log.jsonl"
 
 # ── GLOBAL STATE ─────────────────────────────────────────────────────────
@@ -121,10 +102,9 @@ tape_whale_threshold = 0.5
 tape_last_whale = None
 _hard_stop_tick_count = 0
 
-# 5m/15m RSI state from Lighter API
+# 5m RSI state from Lighter API
 rsi_5m_current = None          # current 5m RSI (for entry — includes forming candle)
-rsi_5m_history = collections.deque(maxlen=60)   # (time, rsi) tuples for delta detection
-rsi_15m_current = None         # current 15m RSI (trend filter)
+rsi_5m_history = collections.deque(maxlen=60)   # (time, rsi) tuples for turning detection
 vwap_current = None            # current VWAP (from today's 5m candles)
 rsi_lock = threading.Lock()
 last_rsi_fetch = 0             # timestamp of last API fetch
@@ -241,26 +221,18 @@ class LocalPosition:
         if self.side == 'short' and current_price >= self.sl_price: return True
         return False
 
-    def update_trailing_stop(self, current_price, distance_override=None):
+    def update_trailing_stop(self, current_price):
+        """Single-tier trailing stop. Activate at 0.30%, trail at 0.15%."""
         if not self.in_position: return None
         profit_pct = self.unrealized_pct(current_price)
-
-        if distance_override:
-            trail_dist = distance_override
-        elif profit_pct >= TRAIL_TIGHT_ACTIVATE:
-            trail_dist = TRAIL_TIGHT_DISTANCE
-        elif profit_pct >= TRAIL_MID_ACTIVATE:
-            trail_dist = TRAIL_MID_DISTANCE
-        else:
-            trail_dist = TRAIL_DISTANCE_PCT
 
         if not self.trailing_active and profit_pct >= TRAIL_ACTIVATE_PCT:
             self.trailing_active = True
             self.best_price = current_price
             if self.side == 'long':
-                self.trail_stop_price = current_price * (1 - trail_dist)
+                self.trail_stop_price = current_price * (1 - TRAIL_DISTANCE_PCT)
             else:
-                self.trail_stop_price = current_price * (1 + trail_dist)
+                self.trail_stop_price = current_price * (1 + TRAIL_DISTANCE_PCT)
             self._save()
             print(f"  TRAIL ACTIVATED at +{profit_pct*100:.3f}% | stop=${self.trail_stop_price:,.1f}")
             return None
@@ -270,13 +242,13 @@ class LocalPosition:
         if self.side == 'long':
             if current_price > self.best_price:
                 self.best_price = current_price
-                self.trail_stop_price = current_price * (1 - trail_dist)
+                self.trail_stop_price = current_price * (1 - TRAIL_DISTANCE_PCT)
             if current_price <= self.trail_stop_price:
                 return 'trail_exit'
         else:
             if current_price < self.best_price:
                 self.best_price = current_price
-                self.trail_stop_price = current_price * (1 + trail_dist)
+                self.trail_stop_price = current_price * (1 + TRAIL_DISTANCE_PCT)
             if current_price >= self.trail_stop_price:
                 return 'trail_exit'
         return None
@@ -332,7 +304,7 @@ def is_entry_locked():
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# WS FEED (orderbook for price + account for fills + trade tape for whales)
+# WS FEED (orderbook for price + account for fills + trade tape)
 # ══════════════════════════════════════════════════════════════════════════
 def ws_thread():
     global ob_bids, ob_asks, imb_ema
@@ -428,7 +400,7 @@ def ws_thread():
                         tape_recent.append(trade_info)
                         if size >= tape_whale_threshold:
                             tape_last_whale = trade_info
-                            if size >= WHALE_MIN_BTC:
+                            if size >= 2.0:
                                 print(f"  WHALE {side.upper()} {size:.2f} BTC (${trade_info['usd']:,.0f}) @ ${price:,.1f}")
                         if (t.get("ask_account_id") == ACCOUNT_INDEX or
                             t.get("bid_account_id") == ACCOUNT_INDEX):
@@ -487,7 +459,6 @@ def fetch_candles_from_lighter(resolution, count=CANDLE_FETCH_COUNT):
     """Fetch candles from Lighter REST API. Returns list of close prices."""
     try:
         now = int(time.time())
-        # Map resolution to seconds for start_timestamp
         res_seconds = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}
         secs = res_seconds.get(resolution, 300)
         start = now - (count * secs)
@@ -498,7 +469,6 @@ def fetch_candles_from_lighter(resolution, count=CANDLE_FETCH_COUNT):
             print(f"  Candle API error ({resolution}): {resp}")
             return []
         candles = resp["c"]
-        # Include forming candle (last one) — matches Lighter's live RSI
         closes = [c["c"] for c in candles]
         return closes
     except Exception as e:
@@ -545,8 +515,8 @@ def compute_vwap(candles):
 
 
 def fetch_rsi_from_lighter():
-    """Fetch 5m and 15m RSI from Lighter REST API. Called every 30s."""
-    global rsi_5m_current, rsi_15m_current, vwap_current, last_rsi_fetch
+    """Fetch 5m RSI + VWAP from Lighter REST API. Called every 30s."""
+    global rsi_5m_current, vwap_current, last_rsi_fetch
 
     # Fetch 5m OHLCV (for both RSI and VWAP)
     ohlcv_5m = fetch_candles_ohlcv("5m", CANDLE_FETCH_COUNT)
@@ -560,19 +530,8 @@ def fetch_rsi_from_lighter():
             if new_rsi_5m is not None:
                 rsi_5m_history.append((time.time(), new_rsi_5m))
         if new_rsi_5m is not None:
-            ago = get_rsi_5m_ago(RSI_DELTA_LOOKBACK)
-            delta_str = f"Δ{new_rsi_5m - ago:+.1f}" if ago else "Δ--"
             vwap_str = f" VWAP=${new_vwap:,.0f}" if new_vwap else ""
-            print(f"  5m RSI: {new_rsi_5m:.1f} ({delta_str}){vwap_str} [{len(closes_5m)} candles]")
-
-    # Fetch 15m candles (trend filter — RSI only, no VWAP needed)
-    closes_15m = fetch_candles_from_lighter("15m", CANDLE_FETCH_COUNT)
-    if closes_15m and len(closes_15m) >= RSI_PERIOD + 2:
-        new_rsi_15m = compute_rsi(closes_15m, RSI_PERIOD)
-        with rsi_lock:
-            rsi_15m_current = new_rsi_15m
-        if new_rsi_15m is not None:
-            print(f"  15m RSI: {new_rsi_15m:.1f} [{len(closes_15m)} candles]")
+            print(f"  5m RSI: {new_rsi_5m:.1f}{vwap_str} [{len(closes_5m)} candles]")
 
     last_rsi_fetch = time.time()
 
@@ -580,174 +539,152 @@ def fetch_rsi_from_lighter():
 # ══════════════════════════════════════════════════════════════════════════
 # RSI HELPERS
 # ══════════════════════════════════════════════════════════════════════════
-def get_rsi_5m_ago(seconds):
-    """Get 5m RSI from N seconds ago (for delta detection)."""
-    cutoff = time.time() - seconds
-    for t, r in reversed(rsi_5m_history):
-        if t <= cutoff:
-            return r
-    return None
-
-
-# ══════════════════════════════════════════════════════════════════════════
-# ENTRY EVALUATION — 5m RSI momentum + price move confirmation
-# ══════════════════════════════════════════════════════════════════════════
-def evaluate_momentum_entry(price):
+def rsi_is_turning(direction):
     """
-    Momentum entry: 5m RSI delta + price move confirmation.
-    Long:  RSI in 20-45, rising 3+ in 600s, price moved 0.10%+ in 60s
-    Short: RSI in 55-80, falling 3+ in 600s, price moved 0.10%+ in 60s
-    + 15m RSI trend filter (only blocks extremes)
-    + VWAP directional filter (only long above VWAP, only short below)
-    + Whale block/confirm
-    Returns (direction, rsi_5m, rsi_15m, whale_confirmed) or (None, ...)
+    Check if RSI is turning in our direction using trough/peak detection.
+    Long: RSI has risen 1.5+ from its lowest reading in last 90s.
+    Short: RSI has fallen 1.5+ from its highest reading in last 90s.
+    Returns (is_turning, current_rsi, extreme_rsi) or (False, rsi, None).
+    """
+    with rsi_lock:
+        rsi_now = rsi_5m_current
+        history = list(rsi_5m_history)
+
+    if rsi_now is None or len(history) < 2:
+        return False, rsi_now, None
+
+    cutoff = time.time() - RSI_TURN_WINDOW
+    window = [r for t, r in history if t >= cutoff]
+    if not window:
+        return False, rsi_now, None
+
+    if direction == 'long':
+        trough = min(window)
+        delta = rsi_now - trough
+        return delta >= RSI_TURN_DELTA, rsi_now, trough
+    else:
+        peak = max(window)
+        delta = peak - rsi_now
+        return delta >= RSI_TURN_DELTA, rsi_now, peak
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# VOLUME SPIKE DETECTION
+# ══════════════════════════════════════════════════════════════════════════
+def detect_volume_spike():
+    """
+    Detect unusual volume in the last 60s vs 10-min rolling average.
+    Returns (spike_level, recent_vol, avg_vol).
+    spike_level: 0=none, 1=normal spike (3x), 2=big spike (5x, bypasses RSI zone)
+    """
+    with tape_lock:
+        trades = list(tape_recent)
+    if not trades:
+        return 0, 0, 0
+
+    now = time.time()
+    recent_vol = sum(t["size"] for t in trades if t["time"] > now - VOL_SPIKE_WINDOW)
+    lookback_vol = sum(t["size"] for t in trades if t["time"] > now - VOL_SPIKE_LOOKBACK)
+
+    # Average volume per window over the lookback period
+    avg_vol = (lookback_vol / VOL_SPIKE_LOOKBACK) * VOL_SPIKE_WINDOW if lookback_vol > 0 else 0
+
+    if avg_vol > 0 and recent_vol >= avg_vol * VOL_BIG_SPIKE_MULTIPLIER:
+        return 2, recent_vol, avg_vol
+    if avg_vol > 0 and recent_vol >= avg_vol * VOL_SPIKE_MULTIPLIER:
+        return 1, recent_vol, avg_vol
+    return 0, recent_vol, avg_vol
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# ENTRY EVALUATION — RSI zone + RSI turning + VWAP (+ volume spike relaxer)
+# ══════════════════════════════════════════════════════════════════════════
+def evaluate_entry(price):
+    """
+    Entry paths:
+    1. Normal: RSI in zone (40/60) + turning + VWAP
+    2. Vol spike (3x): relaxed zones (50/50) + turning + VWAP
+    3. Big spike (5x): NO zone requirement + turning + VWAP (trend following)
+    Returns (direction, rsi_5m, vol_spike) or (None, rsi_5m, False)
     """
     with rsi_lock:
         rsi_5m = rsi_5m_current
-        rsi_15m = rsi_15m_current
         vwap = vwap_current
 
     if rsi_5m is None:
-        return None, rsi_5m, rsi_15m, False
+        return None, rsi_5m, False
 
-    rsi_ago = get_rsi_5m_ago(RSI_DELTA_LOOKBACK)
-    if rsi_ago is None:
-        return None, rsi_5m, rsi_15m, False
+    # Volume spike detection
+    spike_level, recent_vol, avg_vol = detect_volume_spike()
+    is_spike = spike_level > 0
+    is_big_spike = spike_level >= 2
 
-    rsi_delta = rsi_5m - rsi_ago
-    rsi_rising = rsi_delta >= RSI_MIN_DELTA
-    rsi_falling = rsi_delta <= -RSI_MIN_DELTA
-
-    # Price move confirmation — need real price displacement, not just RSI noise
-    with tick_lock:
-        ticks = list(tick_prices)
-    price_move_ok = False
-    if len(ticks) >= 10:
-        cutoff_60s = time.time() - 60
-        recent = [p for t, p in ticks if t > cutoff_60s]
-        if len(recent) >= 5:
-            price_range = (max(recent) - min(recent)) / recent[0]
-            price_move_ok = price_range >= MIN_PRICE_MOVE_PCT / 100
-    if not price_move_ok:
-        return None, rsi_5m, rsi_15m, False
-
-    # 15m RSI trend filter — only blocks extremes
-    long_ok = rsi_15m is None or rsi_15m >= RSI_15M_LONG_MIN
-    short_ok = rsi_15m is None or rsi_15m <= RSI_15M_SHORT_MAX
-
-    # VWAP directional filter — only long above VWAP, only short below
-    if vwap is not None:
-        long_ok = long_ok and (price > vwap)
-        short_ok = short_ok and (price < vwap)
+    if is_big_spike:
+        print(f"  BIG VOL SPIKE: {recent_vol:.2f} BTC in {VOL_SPIKE_WINDOW}s ({recent_vol/avg_vol:.1f}x avg) — RSI zone BYPASSED")
+    elif is_spike:
+        long_max = RSI_LONG_MAX + VOL_SPIKE_ZONE_RELAX
+        short_min = RSI_SHORT_MIN - VOL_SPIKE_ZONE_RELAX
+        print(f"  VOL SPIKE: {recent_vol:.2f} BTC in {VOL_SPIKE_WINDOW}s ({recent_vol/avg_vol:.1f}x avg) — zones relaxed to {long_max}/{short_min}")
 
     direction = None
 
-    # LONG: RSI in buy zone and rising
-    if long_ok and RSI_LONG_ZONE_LOW <= rsi_5m <= RSI_LONG_ZONE_HIGH and rsi_rising:
-        direction = 'long'
+    # ── LONG ──
+    # Big spike: skip zone, just need turning + VWAP
+    # Normal/spike: need RSI in zone
+    long_zone_ok = is_big_spike or rsi_5m < (RSI_LONG_MAX + VOL_SPIKE_ZONE_RELAX if is_spike else RSI_LONG_MAX)
+    if long_zone_ok:
+        turning, _, trough = rsi_is_turning('long')
+        if turning:
+            if vwap is None or price > vwap:
+                direction = 'long'
+                trough_str = f" trough={trough:.1f}" if trough is not None else ""
+                spike_str = " +BIGVOL" if is_big_spike else " +VOL" if is_spike else ""
+                print(f"  SIGNAL: LONG{spike_str} | RSI={rsi_5m:.1f}{trough_str} | price=${price:,.0f} > VWAP=${vwap:,.0f}" if vwap else
+                      f"  SIGNAL: LONG{spike_str} | RSI={rsi_5m:.1f}{trough_str} | VWAP=n/a")
 
-    # SHORT: RSI in sell zone and falling
-    if short_ok and RSI_SHORT_ZONE_LOW <= rsi_5m <= RSI_SHORT_ZONE_HIGH and rsi_falling:
-        direction = 'short'
+    # ── SHORT ──
+    short_zone_ok = is_big_spike or rsi_5m > (RSI_SHORT_MIN - VOL_SPIKE_ZONE_RELAX if is_spike else RSI_SHORT_MIN)
+    if direction is None and short_zone_ok:
+        turning, _, peak = rsi_is_turning('short')
+        if turning:
+            if vwap is None or price < vwap:
+                direction = 'short'
+                peak_str = f" peak={peak:.1f}" if peak is not None else ""
+                spike_str = " +BIGVOL" if is_big_spike else " +VOL" if is_spike else ""
+                print(f"  SIGNAL: SHORT{spike_str} | RSI={rsi_5m:.1f}{peak_str} | price=${price:,.0f} < VWAP=${vwap:,.0f}" if vwap else
+                      f"  SIGNAL: SHORT{spike_str} | RSI={rsi_5m:.1f}{peak_str} | VWAP=n/a")
 
-    if direction is None:
-        return None, rsi_5m, rsi_15m, False
-
-    # Whale check
-    if whale_against_entry(direction):
-        print(f"  WHALE BLOCK: whale against {direction} in last {WHALE_BLOCK_WINDOW}s")
-        return None, rsi_5m, rsi_15m, False
-
-    whale_conf = whale_confirms_entry(direction)
-
-    print(f"  MOMENTUM SIGNAL: {direction.upper()} | 5m={rsi_5m:.1f} (ago={rsi_ago:.1f} Δ{rsi_delta:+.1f})"
-          + (f" | 15m={rsi_15m:.1f}" if rsi_15m else " | 15m=n/a")
-          + (f" | +WHALE" if whale_conf else ""))
-
-    return direction, rsi_5m, rsi_15m, whale_conf
+    return direction, rsi_5m, is_spike
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# RSI EXIT CHECK
+# RSI EXIT CHECK — profit only
 # ══════════════════════════════════════════════════════════════════════════
 def check_rsi_exit(local_pos, price):
     """
-    RSI-based exit signals:
-    - rsi_profit: RSI hit profit zone and reversed → take profit
-    - rsi_stall: holding 5min+, RSI reversing, small profit → take it
-    - rsi_fail: RSI went extreme wrong way → thesis failed, cut loss
+    RSI profit exit only:
+    - Long: RSI >= 65 and profit > 0 → take profit
+    - Short: RSI <= 35 and profit > 0 → take profit
     """
     if not local_pos.in_position:
         return False, ""
 
     with rsi_lock:
         rsi_5m = rsi_5m_current
-    rsi_ago = get_rsi_5m_ago(300)
 
-    if rsi_5m is None or rsi_ago is None:
+    if rsi_5m is None:
         return False, ""
 
-    hold = local_pos.hold_time()
     profit_pct = local_pos.unrealized_pct(price)
-    rsi_falling = rsi_5m < rsi_ago - 0.5
-    rsi_rising = rsi_5m > rsi_ago + 0.5
 
     if local_pos.side == 'long':
-        if rsi_5m >= RSI_LONG_PROFIT_EXIT and rsi_falling and profit_pct > 0.0002:
+        if rsi_5m >= RSI_LONG_PROFIT_EXIT and profit_pct > 0:
             return True, "rsi_profit"
-        if hold >= RSI_STALL_MIN_HOLD and rsi_falling and profit_pct > RSI_STALL_MIN_PROFIT:
-            return True, "rsi_stall"
-        if rsi_5m < RSI_LONG_FAIL:
-            return True, "rsi_fail"
     else:
-        if rsi_5m <= RSI_SHORT_PROFIT_EXIT and rsi_rising and profit_pct > 0.0002:
+        if rsi_5m <= RSI_SHORT_PROFIT_EXIT and profit_pct > 0:
             return True, "rsi_profit"
-        if hold >= RSI_STALL_MIN_HOLD and rsi_rising and profit_pct > RSI_STALL_MIN_PROFIT:
-            return True, "rsi_stall"
-        if rsi_5m > RSI_SHORT_FAIL:
-            return True, "rsi_fail"
 
     return False, ""
-
-
-# ══════════════════════════════════════════════════════════════════════════
-# WHALE FLOW HELPERS
-# ══════════════════════════════════════════════════════════════════════════
-def get_recent_whales(seconds=15):
-    with tape_lock:
-        cutoff = time.time() - seconds
-        return [t for t in tape_recent if t["time"] > cutoff and t["size"] >= WHALE_MIN_BTC]
-
-def whale_against_entry(direction):
-    whales = get_recent_whales(WHALE_BLOCK_WINDOW)
-    if not whales: return False
-    if direction == 'long':
-        return any(w["side"] == "sell" for w in whales)
-    else:
-        return any(w["side"] == "buy" for w in whales)
-
-def whale_confirms_entry(direction):
-    whales = get_recent_whales(WHALE_CONFIRM_WINDOW)
-    if not whales: return False
-    if direction == 'long':
-        return any(w["side"] == "buy" for w in whales)
-    else:
-        return any(w["side"] == "sell" for w in whales)
-
-def whale_against_position(side):
-    whales = get_recent_whales(10)
-    if not whales: return False, 0
-    if side == 'long':
-        sells = [w for w in whales if w["side"] == "sell"]
-        if sells:
-            biggest = max(sells, key=lambda w: w["size"])
-            return True, biggest["size"]
-    else:
-        buys = [w for w in whales if w["side"] == "buy"]
-        if buys:
-            biggest = max(buys, key=lambda w: w["size"])
-            return True, biggest["size"]
-    return False, 0
 
 
 # ── SIGNAL HELPERS (for logging) ─────────────────────────────────────────
@@ -877,15 +814,13 @@ async def attach_sl_order(signer, entry, is_long):
     """
     try:
         if is_long:
-            # SL for LONG = SELL when price drops to trigger
-            sl_p = entry * (1 - SL_PCT)      # trigger price
-            ea = 1                             # is_ask=1 (sell)
-            sl_l = int(sl_p * 0.98 * 10)      # limit 2% BELOW trigger (guarantees fill)
+            sl_p = entry * (1 - SL_PCT)
+            ea = 1
+            sl_l = int(sl_p * 0.98 * 10)
         else:
-            # SL for SHORT = BUY when price rises to trigger
-            sl_p = entry * (1 + SL_PCT)       # trigger price
-            ea = 0                             # is_ask=0 (buy)
-            sl_l = int(sl_p * 1.02 * 10)      # limit 2% ABOVE trigger (guarantees fill)
+            sl_p = entry * (1 + SL_PCT)
+            ea = 0
+            sl_l = int(sl_p * 1.02 * 10)
         sl_t = int(sl_p * 10)
         print(f"  SL order: trigger=${sl_p:,.1f} limit={sl_l} is_ask={ea} reduce_only=True")
         _, _, err = await signer.create_sl_order(
@@ -1141,7 +1076,7 @@ def tg_check():
                 price, _ = get_momentum()
                 ie = get_imb_ema()
                 with rsi_lock:
-                    r5m = rsi_5m_current; r15m = rsi_15m_current; vwap = vwap_current
+                    r5m = rsi_5m_current; vwap = vwap_current
 
                 pos_str = f"{local_pos.side} @ ${local_pos.entry_price:,.0f}" if local_pos.in_position else "flat"
                 sl_str = " SL:ON" if local_pos.oco_attached else " SL:LOCAL" if local_pos.in_position else ""
@@ -1149,15 +1084,14 @@ def tg_check():
                 wr = f"{wins/(wins+losses)*100:.0f}%" if wins+losses > 0 else "N/A"
 
                 r5m_str = f"{r5m:.1f}" if r5m is not None else "n/a"
-                r15m_str = f"{r15m:.1f}" if r15m is not None else "n/a"
                 vwap_s = f"${vwap:,.0f}" if vwap is not None else "n/a"
 
                 pnl_str = ""
                 if local_pos.in_position and price:
                     pnl_str = f"\nUnreal: {local_pos.unrealized_pct(price)*100:+.3f}% hold:{local_pos.hold_time()}s"
 
-                tg(f"v9.2 RSI({RSI_PERIOD})+VWAP [{mode}]\n${price:,.0f} | Imb:{ie:+.2f}\n"
-                   f"RSI 5m:{r5m_str} 15m:{r15m_str}\n"
+                tg(f"v10 RSI({RSI_PERIOD})+VWAP [{mode}]\n${price:,.0f} | Imb:{ie:+.2f}\n"
+                   f"RSI 5m:{r5m_str}\n"
                    f"VWAP: {vwap_s}\n"
                    f"Pos: {pos_str}{sl_str}{pnl_str}\n"
                    f"Day: ${daily_pnl:.2f} | {wins}W/{losses}L ({wr})\n"
@@ -1190,9 +1124,8 @@ def log_trade(side, entry, exit_p, reason, pnl_usd, pnl_pct, hold_secs):
         "reason": reason,
         "hold_secs": hold_secs,
         "rsi_5m": ctx.get("rsi_5m"),
-        "rsi_15m": ctx.get("rsi_15m"),
         "vwap": ctx.get("vwap"),
-        "whale": ctx.get("whale", False),
+        "vol_spike": ctx.get("vol_spike", False),
     }
     try:
         with open(TRADE_LOG_FILE, "a") as f:
@@ -1247,14 +1180,13 @@ async def main():
     global long_pnl, short_pnl, long_trades, short_trades
 
     mode_str = "PAPER" if PAPER_TRADE else "LIVE"
-    print(f"RSI Bot v9.2 — 5m Momentum Scalper (RSI({RSI_PERIOD}) + VWAP) [{mode_str}]")
-    print(f"  Strategy: 5m RSI({RSI_PERIOD}) entry + VWAP filter + 15m trend filter")
-    print(f"  Entry: Long {RSI_LONG_ZONE_LOW}-{RSI_LONG_ZONE_HIGH} rising | Short {RSI_SHORT_ZONE_LOW}-{RSI_SHORT_ZONE_HIGH} falling")
-    print(f"  Filters: RSI Δ>={RSI_MIN_DELTA} in {RSI_DELTA_LOOKBACK}s + price move >={MIN_PRICE_MOVE_PCT}%")
+    print(f"RSI Bot v10 — Simplified RSI Scalper (RSI({RSI_PERIOD}) + VWAP) [{mode_str}]")
+    print(f"  Strategy: RSI zone + RSI turning + VWAP (3 checks)")
+    print(f"  Entry: Long RSI<{RSI_LONG_MAX} turning | Short RSI>{RSI_SHORT_MIN} turning")
+    print(f"  Turn: Δ{RSI_TURN_DELTA} from {RSI_TURN_WINDOW}s trough/peak")
     print(f"  VWAP: long only above VWAP, short only below VWAP")
-    print(f"  15m filter: long>={RSI_15M_LONG_MIN} short<={RSI_15M_SHORT_MAX}")
     print(f"  Size: {BASE_AMOUNT/100000:.4f} BTC | SL:{SL_PCT*100:.2f}% HS:{HARD_STOP_PCT*100:.2f}%")
-    print(f"  Trail: @{TRAIL_ACTIVATE_PCT*100:.2f}% → {TRAIL_DISTANCE_PCT*100:.2f}%/{TRAIL_MID_DISTANCE*100:.2f}%/{TRAIL_TIGHT_DISTANCE*100:.2f}%")
+    print(f"  Trail: @{TRAIL_ACTIVATE_PCT*100:.2f}% → {TRAIL_DISTANCE_PCT*100:.2f}% (single tier)")
     print(f"  RSI source: Lighter REST API ({CANDLE_FETCH_COUNT} candles, poll every {RSI_POLL_INTERVAL}s)")
 
     bot_start_time = time.time()
@@ -1279,11 +1211,10 @@ async def main():
     print("  Fetching initial RSI + VWAP from Lighter API...")
     fetch_rsi_from_lighter()
     with rsi_lock:
-        r5m_boot = rsi_5m_current; r15m_boot = rsi_15m_current; vwap_boot = vwap_current
+        r5m_boot = rsi_5m_current; vwap_boot = vwap_current
     r5m_str = f"{r5m_boot:.1f}" if r5m_boot else "--"
-    r15m_str = f"{r15m_boot:.1f}" if r15m_boot else "--"
     vwap_str = f"${vwap_boot:,.0f}" if vwap_boot else "--"
-    print(f"  Bootstrap: 5m RSI={r5m_str} 15m RSI={r15m_str} VWAP={vwap_str}")
+    print(f"  Bootstrap: 5m RSI={r5m_str} VWAP={vwap_str}")
 
     unlock_entry()
 
@@ -1300,18 +1231,17 @@ async def main():
         print(f"  Stale local position -- clearing")
         local_pos.close("stale_startup")
 
-    tg(f"v9.2 RSI({RSI_PERIOD}) + VWAP [{mode_str}]\n"
-       f"Entry: 5m RSI Δ{RSI_MIN_DELTA}+ in {RSI_DELTA_LOOKBACK}s\n"
-       f"Long: {RSI_LONG_ZONE_LOW}-{RSI_LONG_ZONE_HIGH} | Short: {RSI_SHORT_ZONE_LOW}-{RSI_SHORT_ZONE_HIGH}\n"
+    tg(f"v10 RSI({RSI_PERIOD}) + VWAP [{mode_str}]\n"
+       f"Entry: RSI zone + turning (Δ{RSI_TURN_DELTA}/{RSI_TURN_WINDOW}s)\n"
+       f"Long: RSI<{RSI_LONG_MAX} | Short: RSI>{RSI_SHORT_MIN}\n"
        f"VWAP: long above / short below\n"
-       f"15m filter: L>={RSI_15M_LONG_MIN} S<={RSI_15M_SHORT_MAX}\n"
+       f"Trail: @{TRAIL_ACTIVATE_PCT*100:.2f}% → {TRAIL_DISTANCE_PCT*100:.2f}%\n"
        f"SL:{SL_PCT*100:.2f}% HS:{HARD_STOP_PCT*100:.2f}%\n"
-       f"RSI: 5m={r5m_str} 15m={r15m_str} VWAP={vwap_str}\n"
+       f"RSI: 5m={r5m_str} VWAP={vwap_str}\n"
        f"Source: Lighter REST API (poll {RSI_POLL_INTERVAL}s)"
        + (f"\nPaper: ${paper.balance:.2f}" if PAPER_TRADE else f"\nBalance: ${starting_bal:.2f}"))
 
     last_tg_check = 0
-    last_signal_check = 0  # track when we last evaluated entry signal
 
     while True:
         try:
@@ -1349,15 +1279,14 @@ async def main():
             ie = get_imb_ema()
 
             with rsi_lock:
-                r5m = rsi_5m_current; r15m = rsi_15m_current; vwap = vwap_current
+                r5m = rsi_5m_current; vwap = vwap_current
             r5m_str = f"r5m={r5m:.1f}" if r5m is not None else "r5m=--"
-            r15m_str = f"r15m={r15m:.1f}" if r15m is not None else "r15m=--"
             vwap_str = f"vwap=${vwap:,.0f}" if vwap is not None else "vwap=--"
             pos_str = f"{local_pos.side[0].upper()}" if local_pos.in_position else "-"
             sl_tag = "SL" if local_pos.oco_attached else "L" if local_pos.in_position else ""
             lk = "LOCK" if locked else ""
 
-            print(f"[{time.strftime('%H:%M:%S')}] ${price:,.2f} {r5m_str} {r15m_str} {vwap_str} imb={ie:+.2f} pos={pos_str}{sl_tag} pnl=${daily_pnl:.2f} cd={cd}s hold={hold}s {lk}")
+            print(f"[{time.strftime('%H:%M:%S')}] ${price:,.2f} {r5m_str} {vwap_str} imb={ie:+.2f} pos={pos_str}{sl_tag} pnl=${daily_pnl:.2f} cd={cd}s hold={hold}s {lk}")
 
             # ══════════════════════════════════════════════════════════
             # IN POSITION — exit checks
@@ -1432,12 +1361,7 @@ async def main():
                     await asyncio.sleep(3); continue
 
                 # ── 3. TRAILING STOP ──
-                whale_hit, whale_size = whale_against_position(local_pos.side)
-                trail_dist = WHALE_TIGHTEN_TRAIL_PCT if (whale_hit and local_pos.trailing_active) else None
-                if whale_hit and local_pos.trailing_active:
-                    print(f"  WHALE AGAINST {whale_size:.1f} BTC -- tightening trail to {WHALE_TIGHTEN_TRAIL_PCT*100:.3f}%")
-
-                trail_result = local_pos.update_trailing_stop(price, trail_dist)
+                trail_result = local_pos.update_trailing_stop(price)
                 if trail_result == 'trail_exit':
                     best_pct = abs(local_pos.best_price - local_pos.entry_price) / local_pos.entry_price * 100
                     print(f"  TRAIL EXIT! Best: ${local_pos.best_price:,.1f} (+{best_pct:.3f}%)")
@@ -1457,7 +1381,7 @@ async def main():
                     do_save_state()
                     await asyncio.sleep(1); continue
 
-                # ── 4. RSI EXIT ──
+                # ── 4. RSI PROFIT EXIT ──
                 if rsi_refreshed:
                     rsi_exit, rsi_reason = check_rsi_exit(local_pos, price)
                     if rsi_exit:
@@ -1478,26 +1402,7 @@ async def main():
                         do_save_state()
                         await asyncio.sleep(1); continue
 
-                # ── 5. WHALE PROTECTION ──
-                if whale_hit and not local_pos.trailing_active and unrealized_pct > 0.0004:
-                    print(f"  WHALE EXIT: {whale_size:.1f} BTC against, taking profit +{unrealized_pct*100:.3f}%")
-                    _s = local_pos.side; _e = local_pos.entry_price
-                    if PAPER_TRADE:
-                        pnl_usd, pnl_pct = handle_exit_pnl(_s, _e, price, "whale_exit", True)
-                        tg(f"WHALE EXIT ${price:,.0f}\n{whale_size:.1f} BTC against\n${pnl_usd:+.3f}\n{paper.summary()}")
-                        local_pos.close("whale_exit"); last_trade_time = now; unlock_entry()
-                    else:
-                        success = await close_position(signer, local_pos, "whale_exit", price)
-                        if success:
-                            fill = ws_get_last_fill()
-                            exit_p = fill["price"] if (fill and time.time() - fill["time"] < 5) else price
-                            pnl_usd, pnl_pct = handle_exit_pnl(_s, _e, exit_p, "whale_exit")
-                            last_trade_time = now; unlock_entry()
-                            tg(f"WHALE EXIT ${exit_p:,.0f}\n{whale_size:.1f} BTC against\n${pnl_usd:+.3f} | Day: ${daily_pnl:.2f}")
-                    do_save_state()
-                    await asyncio.sleep(1); continue
-
-                # ── 6. TIME EXIT ──
+                # ── 5. TIME EXIT ──
                 effective_max_hold = TRAIL_MAX_HOLD_SECS if local_pos.trailing_active else MAX_HOLD_SECS
                 if hold > effective_max_hold:
                     _s = local_pos.side; _e = local_pos.entry_price
@@ -1521,7 +1426,7 @@ async def main():
                     print(f"  Holding {local_pos.side} ${local_pos.entry_price:,.0f} pnl={unrealized_pct*100:.3f}% {hold}s {sl_tag}{trail_str}")
 
             # ══════════════════════════════════════════════════════════
-            # ENTRY LOGIC — 5m RSI reversal (only check when RSI refreshed)
+            # ENTRY LOGIC — RSI zone + turning + VWAP (only check when RSI refreshed)
             # ══════════════════════════════════════════════════════════
             elif not local_pos.in_position and not locked:
                 if paused:
@@ -1539,27 +1444,25 @@ async def main():
                     remaining = int(LOSS_COOLDOWN_SECS - (now - last_loss_time))
                     print(f"  Loss CD {remaining}s")
                 elif rsi_refreshed:
-                    # Evaluate momentum entry when we have fresh RSI data
-                    direction, r5m_val, r15m_val, whale_conf = evaluate_momentum_entry(price)
+                    # Evaluate entry when we have fresh RSI data
+                    direction, r5m_val, vol_spike = evaluate_entry(price)
                     if direction:
                         is_long_entry = (direction == 'long')
                         tag = "LONG" if is_long_entry else "SHORT"
-                        whale_str = " +WHALE" if whale_conf else ""
+                        vol_str = " +VOL" if vol_spike else ""
                         r5m_disp = f" 5m={r5m_val:.1f}" if r5m_val is not None else ""
-                        r15m_disp = f" 15m={r15m_val:.1f}" if r15m_val is not None else ""
                         with rsi_lock:
                             vwap_entry = vwap_current
                         vwap_disp = f" VWAP=${vwap_entry:,.0f}" if vwap_entry is not None else ""
 
-                        trade_entry_context = {"rsi_5m": r5m_val, "rsi_15m": r15m_val,
-                            "vwap": vwap_entry, "whale": whale_conf}
+                        trade_entry_context = {"rsi_5m": r5m_val, "vwap": vwap_entry, "vol_spike": vol_spike}
 
                         if PAPER_TRADE:
                             fill = paper.execute_entry(direction, price)
                             lock_entry(); local_pos.open(direction, fill)
                             _hard_stop_tick_count = 0
                             last_trade_time = now; last_direction = direction; trades_this_hour += 1
-                            tg(f"{tag} ${fill:,.0f}{whale_str}\nRSI{r5m_disp}{r15m_disp}{vwap_disp}\nSL:${local_pos.sl_price:,.0f}")
+                            tg(f"{tag} ${fill:,.0f}{vol_str}\nRSI{r5m_disp}{vwap_disp}\nSL:${local_pos.sl_price:,.0f}")
                             do_save_state()
                             await asyncio.sleep(5); continue
                         else:
@@ -1568,7 +1471,7 @@ async def main():
                                 lock_entry(); await asyncio.sleep(10); continue
 
                             lock_entry()
-                            print(f"  {tag} ${price:,.0f} RSI{r5m_disp}{r15m_disp}{vwap_disp} imb={ie:+.2f}{whale_str}")
+                            print(f"  {tag} ${price:,.0f} RSI{r5m_disp}{vwap_disp} imb={ie:+.2f}{vol_str}")
                             await cancel_stale_orders(signer)
                             _, _, err = await signer.create_market_order_limited_slippage(
                                 market_index=MARKET_INDEX, client_order_index=0,
@@ -1587,7 +1490,7 @@ async def main():
                                 local_pos.open(direction, entry_price)
                                 _hard_stop_tick_count = 0
                                 last_trade_time = now; last_direction = direction; trades_this_hour += 1
-                                tg(f"{tag} ${entry_price:,.0f}{whale_str}\nRSI{r5m_disp}{r15m_disp}{vwap_disp}\nSL:${local_pos.sl_price:,.0f}")
+                                tg(f"{tag} ${entry_price:,.0f}{vol_str}\nRSI{r5m_disp}{vwap_disp}\nSL:${local_pos.sl_price:,.0f}")
                                 do_save_state()
                                 asyncio.create_task(attach_sl_background(signer, is_long_entry, entry_price))
                                 await asyncio.sleep(5); continue
