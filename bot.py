@@ -26,9 +26,9 @@ PAPER_STARTING_BALANCE = 71.30
 
 # ── CONFIG ───────────────────────────────────────────────────────────────
 ACCOUNT_INDEX=716892; API_KEY_INDEX=3
-API_PRIVATE_KEY = os.environ.get("LIGHTER_API_KEY", "5a9634234bac159b30afd8f6bca2a4fa57a46e6318a37447efd364ee90756d2138da41588bdabe55")
+API_PRIVATE_KEY = os.environ.get("LIGHTER_API_KEY", "")
 LIGHTER_URL="https://mainnet.zklighter.elliot.ai"; MARKET_INDEX=1
-TG_TOKEN = os.environ.get("TG_TOKEN", "8536956116:AAGOWByFex_n1wraFuGFwf7e5YPVe2Vyegw")
+TG_TOKEN = os.environ.get("TG_TOKEN", "")
 TG_CHAT = os.environ.get("TG_CHAT", "5583279698")
 
 BASE_AMOUNT = 150  # 0.0015 BTC (~$100 notional, ~$2 margin at 50x)
@@ -39,11 +39,13 @@ LIGHTER_CANDLE_URL = "https://mainnet.zklighter.elliot.ai/api/v1/candles"
 CANDLE_FETCH_COUNT = 200       # 200 candles — plenty for RSI + VWAP
 
 # Entry zones: tighter — true oversold/overbought
-RSI_LONG_MAX = 42              # long when RSI < 42
-RSI_SHORT_MIN = 58             # short when RSI > 58
+RSI_LONG_MAX = 42              # long only on deep oversold
+RSI_SHORT_MIN = 65             # short when RSI > 65
+EMA_OVERRIDE_LONG = 30          # RSI below this bypasses EMA block for longs
+EMA_OVERRIDE_SHORT = 75         # RSI above this bypasses EMA block for shorts
 
 # RSI turning: confirms reversal from trough/peak
-RSI_TURN_DELTA = 1.0           # min RSI rise from trough (long) or fall from peak (short)
+RSI_TURN_DELTA = 2.0           # min RSI rise from trough (long) or fall from peak (short)
 RSI_TURN_WINDOW = 120          # seconds to look back for trough/peak
 
 # RSI-based exits — profit only
@@ -54,16 +56,16 @@ RSI_SHORT_PROFIT_EXIT = 35     # take profit when RSI reaches oversold-ish
 VOL_SPIKE_WINDOW = 60          # seconds to measure recent volume
 VOL_SPIKE_LOOKBACK = 600       # seconds for average volume baseline
 VOL_SPIKE_MULTIPLIER = 3.0     # recent must be 3x average to count as spike
-VOL_SPIKE_ZONE_RELAX = 5       # relax RSI zones by 5 pts during spike (35/65 → 40/60)
+VOL_SPIKE_ZONE_RELAX = 2       # relax RSI zones by 5 pts during spike (35/65 → 40/60)
 VOL_BIG_SPIKE_MULTIPLIER = 5.0 # 5x average = big spike (uses same relaxed zones, no bypass)
 
 # ── SESSION FILTER ───────────────────────────────────────────────────────
-SESSION_FILTER_ENABLED = True
+SESSION_FILTER_ENABLED = False
 SESSION_BLOCKED_HOURS_UTC = (0, 1, 2, 3)  # skip 00:00-03:59 UTC (thin Asian liquidity)
 
 # ── ADX REGIME FILTER (15m) ──────────────────────────────────────────────
 ADX_PERIOD = 14
-ADX_TREND_THRESHOLD = 35       # ADX > 35 = strong trend, skip mean-reversion
+ADX_TREND_THRESHOLD = 40       # ADX > 40 = strong trend, skip mean-reversion
 ADX_TIMEFRAME = "15m"
 ADX_POLL_INTERVAL = 60         # fetch 15m candles every 60s (they change slowly)
 
@@ -72,7 +74,6 @@ VWAP_SIGMA_ENTRY = 0.75        # require price at VWAP ± 0.75σ for entry
 
 # ── TREND FILTER (EMA on 5m) ────────────────────────────────────────────
 TREND_EMA_PERIOD = 20           # EMA(20) on 5m closes — skip longs below, shorts unfiltered
-TREND_FILTER_ENABLED = True
 
 # ── OB IMBALANCE FILTER ──────────────────────────────────────────────────
 IMB_FILTER_ENABLED = False
@@ -86,19 +87,19 @@ RSI_POLL_INTERVAL = 20         # seconds between Lighter API candle fetches
 ATR_PERIOD = 14
 ATR_SL_MULTIPLIER = 1.2        # SL = 1.2x ATR
 ATR_TP_MULTIPLIER = 2.5        # TP target = 2.5x ATR (for R:R calc, trail handles actual exit)
-ATR_TRAIL_ACTIVATE_MULT = 0.5  # activate trail after 0.5x ATR profit
-ATR_TRAIL_DISTANCE_MULT = 0.5  # trail distance = 0.5x ATR
+ATR_TRAIL_ACTIVATE_MULT = 0.3  # activate trail after 0.3x ATR profit (was 0.5)
+ATR_TRAIL_DISTANCE_MULT = 0.4  # trail distance = 0.4x ATR (was 0.5)
 ATR_MIN_SL_PCT = 0.0015        # floor: never tighter than 0.15%
-ATR_MAX_SL_PCT = 0.0060        # ceiling: never wider than 0.60%
-HARD_STOP_PCT = 0.0080         # hard backstop wider than max ATR SL
-MAX_HOLD_SECS = 900            # 15 min normal
-TRAIL_MAX_HOLD_SECS = 1200     # 20 min trailing
+ATR_MAX_SL_PCT = 0.0035        # ceiling: never wider than 0.35% (was 0.60%)
+HARD_STOP_PCT = 0.0045         # hard backstop 0.45% (was 0.80%)
+MAX_HOLD_SECS = 300            # 5 min normal (was 900)
+TRAIL_MAX_HOLD_SECS = 450      # 7.5 min trailing (was 1200)
 LOCK_DURATION = 450
 
 # ── COOLDOWNS ────────────────────────────────────────────────────────────
 MIN_TRADE_INTERVAL = 45        # 45s between trades
 LOSS_COOLDOWN_SECS = 60        # pause after loss
-LOSS_STREAK_COOLDOWN = 300     # 5 min after 3 losses
+LOSS_STREAK_COOLDOWN = 600     # 10 min after 2 losses (was 300s after 3)
 MAX_TRADES_HOUR = 8            # reduced from 15 (tighter filters = fewer, better trades)
 DAILY_LOSS_LIMIT = 2.0
 
@@ -124,6 +125,7 @@ acct_ws_balance = 0.0
 acct_ws_last_trade = None
 acct_ws_ready = threading.Event()
 acct_ws_trade_queue = collections.deque(maxlen=50)
+acct_ws_pos_updated_at = 0.0  # timestamp of last WS position update
 
 tape_lock = threading.Lock()
 tape_recent = collections.deque(maxlen=500)
@@ -140,6 +142,8 @@ vwap_upper_band = None         # VWAP + 1σ
 vwap_lower_band = None         # VWAP - 1σ
 rsi_lock = threading.Lock()
 last_rsi_fetch = 0
+last_rest_pos_verify = 0
+REST_POS_VERIFY_INTERVAL = 60  # verify exchange position via REST every 60s
 
 # ATR state
 atr_5m_current = None
@@ -378,12 +382,12 @@ def is_entry_locked():
 # ══════════════════════════════════════════════════════════════════════════
 def ws_thread():
     global ob_bids, ob_asks, imb_ema
-    global acct_ws_position, acct_ws_balance, acct_ws_last_trade
+    global acct_ws_position, acct_ws_balance, acct_ws_last_trade, acct_ws_pos_updated_at
     global tape_last_whale
 
     def on_msg(ws, msg):
         global ob_bids, ob_asks, imb_ema
-        global acct_ws_position, acct_ws_balance, acct_ws_last_trade
+        global acct_ws_position, acct_ws_balance, acct_ws_last_trade, acct_ws_pos_updated_at
         global tape_last_whale
         try:
             data = json.loads(msg)
@@ -422,8 +426,10 @@ def ws_thread():
                             entry = float(pos_data.get("avg_entry_price", "0"))
                             oo = int(pos_data.get("open_order_count", 0))
                             acct_ws_position = {"size": size, "sign": sign, "entry": entry, "open_orders": oo}
+                            acct_ws_pos_updated_at = time.time()
                         else:
                             acct_ws_position = {"size": 0.0, "sign": 0, "entry": 0.0, "open_orders": 0}
+                            acct_ws_pos_updated_at = time.time()
                     assets = data.get("assets", {})
                     usdc = assets.get("3") or assets.get("0")
                     if usdc:
@@ -488,7 +494,12 @@ def ws_thread():
                                 print(f"  OUR FILL: {side} {size:.5f} @ ${price:,.1f}")
         except: pass
 
-    def on_close(ws, *a): pass
+    def on_close(ws, *a):
+        global acct_ws_pos_updated_at
+        print("  WS disconnected — marking position data stale")
+        acct_ws_ready.clear()
+        with acct_ws_lock:
+            acct_ws_pos_updated_at = 0.0  # mark stale
     def on_open(ws):
         print("  WS connected")
         ws.send(json.dumps({"type": "subscribe", "channel": "order_book/1"}))
@@ -819,11 +830,16 @@ def evaluate_entry(price):
         if current_hour_utc in SESSION_BLOCKED_HOURS_UTC:
             return None, rsi_5m, False
 
-    # ADX regime filter — DISABLED (v9 was profitable without it)
-    # with adx_lock:
-    #     adx = adx_current
-    # if adx is not None and adx > ADX_TREND_THRESHOLD:
-    #     return None, rsi_5m, False
+    # EMA trend filter — block counter-trend entries (always active)
+    ema_block_long = False
+    ema_block_short = False
+    with rsi_lock:
+        ema = ema_5m_current
+    if ema is not None:
+        if price > ema:
+            ema_block_short = True   # uptrend: don’t short
+        elif price < ema:
+            ema_block_long = True    # downtrend: don’t long
 
     # Volume spike detection — relaxes RSI zones
     spike_level, recent_vol, avg_vol = detect_volume_spike()
@@ -843,14 +859,12 @@ def evaluate_entry(price):
 
     # ── LONG ──
     long_zone_ok = rsi_5m < (RSI_LONG_MAX + VOL_SPIKE_ZONE_RELAX if is_spike or is_big_spike else RSI_LONG_MAX)
-    if long_zone_ok:
-        # Trend filter: skip longs when price is below EMA(20) — fighting the trend
-        if TREND_FILTER_ENABLED:
-            with rsi_lock:
-                ema = ema_5m_current
-            if ema is not None and price < ema:
-                print(f"  LONG blocked: price ${price:,.0f} < EMA(20) ${ema:,.0f}")
-                long_zone_ok = False
+    if long_zone_ok and ema_block_long:
+        if rsi_5m < EMA_OVERRIDE_LONG:
+            print(f"  EMA override: RSI {rsi_5m:.1f} < {EMA_OVERRIDE_LONG} — allowing LONG despite price ${price:,.0f} < EMA ${ema:,.0f}")
+        else:
+            print(f"  LONG blocked: price ${price:,.0f} < EMA({TREND_EMA_PERIOD}) ${ema:,.0f}")
+            long_zone_ok = False
 
     if long_zone_ok:
         turning, _, trough = rsi_is_turning('long')
@@ -862,14 +876,12 @@ def evaluate_entry(price):
 
     # ── SHORT ──
     short_zone_ok = rsi_5m > (RSI_SHORT_MIN - VOL_SPIKE_ZONE_RELAX if is_spike or is_big_spike else RSI_SHORT_MIN)
-    if direction is None and short_zone_ok:
-        # Trend filter: skip shorts when price is above EMA(20) — fighting the trend
-        if TREND_FILTER_ENABLED:
-            with rsi_lock:
-                ema = ema_5m_current
-            if ema is not None and price > ema:
-                print(f"  SHORT blocked: price ${price:,.0f} > EMA(20) ${ema:,.0f}")
-                short_zone_ok = False
+    if direction is None and short_zone_ok and ema_block_short:
+        if rsi_5m > EMA_OVERRIDE_SHORT:
+            print(f"  EMA override: RSI {rsi_5m:.1f} > {EMA_OVERRIDE_SHORT} — allowing SHORT despite price ${price:,.0f} > EMA ${ema:,.0f}")
+        else:
+            print(f"  SHORT blocked: price ${price:,.0f} > EMA({TREND_EMA_PERIOD}) ${ema:,.0f}")
+            short_zone_ok = False
 
     if direction is None and short_zone_ok:
         turning, _, peak = rsi_is_turning('short')
@@ -934,8 +946,13 @@ def calc_pnl_from_prices(side, entry_price, exit_price):
 
 
 # ── ACCOUNT WS HELPERS ──────────────────────────────────────────────────
+WS_STALE_SECS = 30  # if no WS position update in 30s, data is stale
+
 def ws_get_position():
     with acct_ws_lock: return dict(acct_ws_position)
+
+def ws_pos_is_stale():
+    with acct_ws_lock: return acct_ws_pos_updated_at == 0.0 or (time.time() - acct_ws_pos_updated_at > WS_STALE_SECS)
 
 def ws_is_flat():
     with acct_ws_lock: return acct_ws_position["size"] == 0.0
@@ -963,6 +980,35 @@ async def ws_wait_for_position(timeout=10):
 
 async def position_sync_check(signer, local_pos):
     ws_pos = ws_get_position()
+    stale = ws_pos_is_stale()
+
+    # If WS data is stale AND we think we're in a position, verify via REST
+    if stale and local_pos.in_position:
+        print(f"  SYNC: WS data stale — verifying position via REST")
+        rest_pos = api_get_position()
+        if rest_pos:
+            if rest_pos["size"] == 0:
+                # Exchange is flat but local thinks we're in a position — phantom!
+                _s = local_pos.side
+                _e = local_pos.entry_price
+                exit_p = local_pos.sl_price if local_pos.sl_price else _e
+                pnl_usd, pnl_pct = calc_pnl_from_prices(_s, _e, exit_p)
+                print(f"  SYNC: Phantom {_s} cleared — exchange flat (WS was stale)")
+                _x = "🟢" if pnl_usd >= 0 else "🔴"
+                tg(f"{_x} ${pnl_usd:+.3f} ({pnl_pct*100:+.2f}%)\n{_s.upper()} ${_e:,.0f} → ${exit_p:,.0f} | SL (stale WS)\nDay: ${daily_pnl:.2f} | {wins}W/{losses}L")
+                handle_exit_pnl(_s, _e, exit_p, "sl_exchange")
+                local_pos.close("sync_stale_ws")
+                do_save_state()
+                return True
+            else:
+                # Exchange has position, update WS state from REST to un-stale it
+                with acct_ws_lock:
+                    global acct_ws_pos_updated_at
+                    acct_ws_position.update({"size": rest_pos["size"], "sign": rest_pos["sign"], "entry": rest_pos["entry"], "open_orders": rest_pos["open_orders"]})
+                    acct_ws_pos_updated_at = time.time()
+        return False
+
+    # CASE A: Local flat but exchange has position (naked/orphan)
     if not local_pos.in_position and ws_pos["size"] > 0:
         is_long = ws_pos["sign"] > 0
         side_str = "LONG" if is_long else "SHORT"
@@ -989,13 +1035,14 @@ async def position_sync_check(signer, local_pos):
             print(f"  SYNC: Error: {e}"); tg(f"Naked close error: {e}")
         return True
 
+    # CASE B: Local says in_position but WS says flat — confirm with REST
     if local_pos.in_position and ws_pos["size"] == 0:
         rest_pos = api_get_position()
         if rest_pos and rest_pos["size"] == 0:
             _s = local_pos.side
             _e = local_pos.entry_price
-            # Best guess: SL filled on exchange
-            exit_p = local_pos.sl_price if local_pos.sl_price else price
+            exit_p = local_pos.sl_price if local_pos.sl_price else _e
+            pnl_usd, pnl_pct = calc_pnl_from_prices(_s, _e, exit_p)
             print(f"  SYNC: Bot thinks {_s} but exchange flat — SL likely filled")
             _x = "🟢" if pnl_usd >= 0 else "🔴"
             tg(f"{_x} ${pnl_usd:+.3f} ({pnl_pct*100:+.2f}%)\n{_s.upper()} ${_e:,.0f} → ${exit_p:,.0f} | SL\nDay: ${daily_pnl:.2f} | {wins}W/{losses}L")
@@ -1272,8 +1319,8 @@ last_trade_time = state["last_trade_time"]
 wins = 0; losses = 0
 long_pnl = 0.0; short_pnl = 0.0; long_trades = 0; short_trades = 0
 last_update_id = 0; paused = False; last_day = state["last_day"]
-consecutive_losses = state.get("consecutive_losses", 0)
-last_loss_time = state.get("last_loss_time", 0)
+consecutive_losses = 0  # reset on restart — don't penalize deploys
+last_loss_time = 0
 last_direction = state["last_direction"]
 
 def track_direction_pnl(side, pnl):
@@ -1420,7 +1467,7 @@ async def main():
     global daily_pnl, daily_trades, trades_this_hour, hour_reset_time, last_trade_time
     global wins, losses, last_day, paused, last_direction
     global consecutive_losses, last_loss_time, bot_start_time
-    global last_rsi_fetch, last_adx_fetch
+    global last_rsi_fetch, last_adx_fetch, last_rest_pos_verify
     global long_pnl, short_pnl, long_trades, short_trades
     global signal_debounce
 
@@ -1486,8 +1533,8 @@ async def main():
         print(f"  Stale local position -- clearing")
         local_pos.close("stale_startup")
 
-    tg(f"v11 RSI({RSI_PERIOD}) + EMA trend [{mode_str}]\n"
-       f"Entry: RSI<{RSI_LONG_MAX}/>={RSI_SHORT_MIN} | Longs: price>EMA({TREND_EMA_PERIOD})\n"
+    tg(f"v11 RSI({RSI_PERIOD}) + ADX trend filter [{mode_str}]\n"
+       f"Entry: RSI<{RSI_LONG_MAX}/>={RSI_SHORT_MIN} | ADX>{ADX_TREND_THRESHOLD} blocks counter-trend\n"
        f"Session: skip {SESSION_BLOCKED_HOURS_UTC}\n"
        f"Stops: ATR-based ({ATR_SL_MULTIPLIER}x SL, {ATR_TRAIL_DISTANCE_MULT}x trail)\n"
        f"RSI: 5m={r5m_str} EMA(20)={ema_str} ADX={adx_str}"
@@ -1528,6 +1575,23 @@ async def main():
             if not PAPER_TRADE and signer:
                 sync_handled = await position_sync_check(signer, local_pos)
                 if sync_handled: await asyncio.sleep(3); continue
+
+            # Periodic REST position verify (catches stale WS even when it looks fresh)
+            if not PAPER_TRADE and local_pos.in_position and now - last_rest_pos_verify >= REST_POS_VERIFY_INTERVAL:
+                last_rest_pos_verify = now
+                rest_pos = api_get_position()
+                if rest_pos and rest_pos["size"] == 0:
+                    _s = local_pos.side
+                    _e = local_pos.entry_price
+                    exit_p = local_pos.sl_price if local_pos.sl_price else _e
+                    pnl_usd, pnl_pct = calc_pnl_from_prices(_s, _e, exit_p)
+                    print(f"  REST VERIFY: Phantom {_s} — exchange flat! Clearing.")
+                    _x = "🟢" if pnl_usd >= 0 else "🔴"
+                    tg(f"{_x} ${pnl_usd:+.3f} ({pnl_pct*100:+.2f}%)\n{_s.upper()} ${_e:,.0f} → ${exit_p:,.0f} | SL (REST verify)\nDay: ${daily_pnl:.2f} | {wins}W/{losses}L")
+                    handle_exit_pnl(_s, _e, exit_p, "sl_exchange")
+                    local_pos.close("rest_verify_flat")
+                    do_save_state()
+                    await asyncio.sleep(3); continue
 
             locked = is_entry_locked()
             cd = max(0, int(last_trade_time + MIN_TRADE_INTERVAL - now))
@@ -1737,7 +1801,7 @@ async def main():
                     print("  Max trades/hr")
                 elif cd > 0:
                     print(f"  CD {cd}s")
-                elif consecutive_losses >= 3 and now - last_loss_time < LOSS_STREAK_COOLDOWN:
+                elif consecutive_losses >= 2 and now - last_loss_time < LOSS_STREAK_COOLDOWN:
                     remaining = int(LOSS_STREAK_COOLDOWN - (now - last_loss_time))
                     print(f"  Loss streak CD ({consecutive_losses}L) {remaining}s")
                 elif consecutive_losses > 0 and now - last_loss_time < LOSS_COOLDOWN_SECS:
