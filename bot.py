@@ -91,9 +91,9 @@ ATR_TRAIL_ACTIVATE_MULT = 0.3  # activate trail after 0.3x ATR profit (was 0.5)
 ATR_TRAIL_DISTANCE_MULT = 0.4  # trail distance = 0.4x ATR (was 0.5)
 ATR_MIN_SL_PCT = 0.0015        # floor: never tighter than 0.15%
 ATR_MAX_SL_PCT = 0.0035        # ceiling: never wider than 0.35% (was 0.60%)
-HARD_STOP_PCT = 0.0045         # hard backstop 0.45% (was 0.80%)
-MAX_HOLD_SECS = 300            # 5 min normal (was 900)
-TRAIL_MAX_HOLD_SECS = 450      # 7.5 min trailing (was 1200)
+HARD_STOP_PCT = 0.0035         # hard backstop 0.35% (was 0.45%)
+MAX_HOLD_SECS = 210            # 3.5 min normal (was 300)
+TRAIL_MAX_HOLD_SECS = 330      # 5.5 min trailing (was 450)
 LOCK_DURATION = 450
 
 # ── COOLDOWNS ────────────────────────────────────────────────────────────
@@ -1313,15 +1313,21 @@ async def startup_close_orphan(signer):
 
 # ── GLOBALS ─────────────────────────────────────────────────────────────
 state = load_state()
-daily_pnl = 0.0; daily_trades = 0
 trades_this_hour = 0; hour_reset_time = time.time()
 last_trade_time = state["last_trade_time"]
-wins = 0; losses = 0
-long_pnl = 0.0; short_pnl = 0.0; long_trades = 0; short_trades = 0
 last_update_id = 0; paused = False; last_day = state["last_day"]
-consecutive_losses = 0  # reset on restart — don't penalize deploys
-last_loss_time = 0
 last_direction = state["last_direction"]
+long_pnl = 0.0; short_pnl = 0.0; long_trades = 0; short_trades = 0
+
+# Restore counters from state (survive restarts)
+if last_day == time.strftime("%d"):
+    daily_pnl = state["daily_pnl"]; daily_trades = state["daily_trades"]
+    wins = state["wins"]; losses = state["losses"]
+    consecutive_losses = state["consecutive_losses"]
+    last_loss_time = state["last_loss_time"]
+else:
+    daily_pnl = 0.0; daily_trades = 0; wins = 0; losses = 0
+    consecutive_losses = 0; last_loss_time = 0
 
 def track_direction_pnl(side, pnl):
     global long_pnl, short_pnl, long_trades, short_trades
