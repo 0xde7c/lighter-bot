@@ -24,6 +24,9 @@ import websocket as ws_lib
 PAPER_TRADE = False
 PAPER_STARTING_BALANCE = 71.30
 
+# ── VERSION ──────────────────────────────────────────────────────────────
+BOT_VERSION = "v11.1"          # bump this on every meaningful change
+
 # ── CONFIG ───────────────────────────────────────────────────────────────
 ACCOUNT_INDEX=716892; API_KEY_INDEX=3
 API_PRIVATE_KEY = os.environ.get("LIGHTER_API_KEY", "")
@@ -995,7 +998,7 @@ async def position_sync_check(signer, local_pos):
                 pnl_usd, pnl_pct = calc_pnl_from_prices(_s, _e, exit_p)
                 print(f"  SYNC: Phantom {_s} cleared — exchange flat (WS was stale)")
                 _x = "🟢" if pnl_usd >= 0 else "🔴"
-                tg(f"{_x} ${pnl_usd:+.3f} ({pnl_pct*100:+.2f}%)\n{_s.upper()} ${_e:,.0f} → ${exit_p:,.0f} | SL (stale WS)\nDay: ${daily_pnl:.2f} | {wins}W/{losses}L")
+                tg(f"{_x} ${pnl_usd:+.3f} ({pnl_pct*100:+.2f}%)\n{_s.upper()} ${_e:,.0f} → ${exit_p:,.0f} | SL (stale WS)\nDay: ${daily_pnl:.2f} | {wins}W/{losses}L\n{BOT_VERSION}: ${ver_pnl:+.2f} | {ver_trades}t")
                 handle_exit_pnl(_s, _e, exit_p, "sl_exchange")
                 local_pos.close("sync_stale_ws")
                 do_save_state()
@@ -1045,7 +1048,7 @@ async def position_sync_check(signer, local_pos):
             pnl_usd, pnl_pct = calc_pnl_from_prices(_s, _e, exit_p)
             print(f"  SYNC: Bot thinks {_s} but exchange flat — SL likely filled")
             _x = "🟢" if pnl_usd >= 0 else "🔴"
-            tg(f"{_x} ${pnl_usd:+.3f} ({pnl_pct*100:+.2f}%)\n{_s.upper()} ${_e:,.0f} → ${exit_p:,.0f} | SL\nDay: ${daily_pnl:.2f} | {wins}W/{losses}L")
+            tg(f"{_x} ${pnl_usd:+.3f} ({pnl_pct*100:+.2f}%)\n{_s.upper()} ${_e:,.0f} → ${exit_p:,.0f} | SL\nDay: ${daily_pnl:.2f} | {wins}W/{losses}L\n{BOT_VERSION}: ${ver_pnl:+.2f} | {ver_trades}t")
             handle_exit_pnl(_s, _e, exit_p, "sl_exchange")
             local_pos.close("sync_flat")
             do_save_state()
@@ -1062,7 +1065,9 @@ def save_state(data):
 def load_state():
     d = {"last_trade_time": 0, "last_direction": None,
          "daily_pnl": 0, "wins": 0, "losses": 0, "daily_trades": 0,
-         "last_day": time.strftime("%d"), "consecutive_losses": 0, "last_loss_time": 0}
+         "last_day": time.strftime("%d"), "consecutive_losses": 0, "last_loss_time": 0,
+         "ver": BOT_VERSION, "ver_pnl": 0.0, "ver_trades": 0, "ver_wins": 0, "ver_losses": 0,
+         "ver_started": time.strftime("%Y-%m-%d %H:%M")}
     try:
         with open(STATE_FILE) as f:
             data = json.load(f)
@@ -1329,6 +1334,16 @@ else:
     daily_pnl = 0.0; daily_trades = 0; wins = 0; losses = 0
     consecutive_losses = 0; last_loss_time = 0
 
+# Version-level tracking — reset on version change
+if state["ver"] == BOT_VERSION:
+    ver_pnl = state["ver_pnl"]; ver_trades = state["ver_trades"]
+    ver_wins = state["ver_wins"]; ver_losses = state["ver_losses"]
+    ver_started = state["ver_started"]
+else:
+    print(f"  Version changed: {state['ver']} → {BOT_VERSION} — resetting baseline")
+    ver_pnl = 0.0; ver_trades = 0; ver_wins = 0; ver_losses = 0
+    ver_started = time.strftime("%Y-%m-%d %H:%M")
+
 def track_direction_pnl(side, pnl):
     global long_pnl, short_pnl, long_trades, short_trades
     if side == 'long': long_pnl += pnl; long_trades += 1
@@ -1378,12 +1393,14 @@ def tg_check():
                 if local_pos.in_position and price:
                     pnl_str = f"\nUnreal: {local_pos.unrealized_pct(price)*100:+.3f}% hold:{local_pos.hold_time()}s"
 
-                tg(f"v11 RSI({RSI_PERIOD})+VWAPσ+ADX [{mode}]\n${price:,.0f} | Imb:{ie:+.2f}\n"
+                ver_wr = f"{ver_wins/(ver_wins+ver_losses)*100:.0f}%" if ver_wins+ver_losses > 0 else "N/A"
+                tg(f"{BOT_VERSION} RSI({RSI_PERIOD})+VWAPσ+ADX [{mode}]\n${price:,.0f} | Imb:{ie:+.2f}\n"
                    f"RSI 5m:{r5m_str} | ADX:{adx_s} | ATR:{atr_s}\n"
                    f"VWAP: {vwap_s}\n"
                    f"Pos: {pos_str}{sl_str}{pnl_str}\n"
                    f"Day: ${daily_pnl:.2f} | {wins}W/{losses}L ({wr})\n"
-                   f"L: {long_trades}t ${long_pnl:+.2f} | S: {short_trades}t ${short_pnl:+.2f}\n"
+                   f"{BOT_VERSION}: ${ver_pnl:+.2f} | {ver_trades}t {ver_wins}W/{ver_losses}L ({ver_wr})\n"
+                   f"Since: {ver_started}\n"
                    f"Streak: {consecutive_losses}L | HS:{HARD_STOP_PCT*100:.2f}%")
             elif msg == "/trades" and PAPER_TRADE and paper:
                 if not paper.trade_log: tg("No trades yet")
@@ -1437,7 +1454,7 @@ def log_trade(side, entry, exit_p, reason, pnl_usd, pnl_pct, hold_secs):
 # ══════════════════════════════════════════════════════════════════════════
 def handle_exit_pnl(side, entry, exit_p, reason, is_paper=False):
     global daily_pnl, daily_trades, wins, losses, consecutive_losses, last_loss_time
-    global last_trade_time
+    global last_trade_time, ver_pnl, ver_trades, ver_wins, ver_losses
 
     hold_secs = local_pos.hold_time()
 
@@ -1447,6 +1464,9 @@ def handle_exit_pnl(side, entry, exit_p, reason, is_paper=False):
         daily_trades = paper.total_trades
         if pnl_usd >= 0: consecutive_losses = 0
         else: consecutive_losses += 1; last_loss_time = time.time()
+        ver_pnl += pnl_usd; ver_trades += 1
+        if pnl_usd >= 0: ver_wins += 1
+        else: ver_losses += 1
         log_trade(side, entry, exit_p, reason, pnl_usd, pnl_pct, hold_secs)
         return pnl_usd, pnl_pct
     else:
@@ -1455,6 +1475,9 @@ def handle_exit_pnl(side, entry, exit_p, reason, is_paper=False):
         track_direction_pnl(side, pnl_usd)
         if pnl_usd >= 0: wins += 1; consecutive_losses = 0
         else: losses += 1; consecutive_losses += 1; last_loss_time = time.time()
+        ver_pnl += pnl_usd; ver_trades += 1
+        if pnl_usd >= 0: ver_wins += 1
+        else: ver_losses += 1
         log_trade(side, entry, exit_p, reason, pnl_usd, pnl_pct, hold_secs)
         return pnl_usd, pnl_pct
 
@@ -1463,7 +1486,9 @@ def do_save_state():
     save_state({"last_trade_time": last_trade_time, "last_direction": last_direction,
         "daily_pnl": daily_pnl, "wins": wins, "losses": losses,
         "daily_trades": daily_trades, "last_day": last_day,
-        "consecutive_losses": consecutive_losses, "last_loss_time": last_loss_time})
+        "consecutive_losses": consecutive_losses, "last_loss_time": last_loss_time,
+        "ver": BOT_VERSION, "ver_pnl": ver_pnl, "ver_trades": ver_trades,
+        "ver_wins": ver_wins, "ver_losses": ver_losses, "ver_started": ver_started})
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1476,6 +1501,7 @@ async def main():
     global last_rsi_fetch, last_adx_fetch, last_rest_pos_verify
     global long_pnl, short_pnl, long_trades, short_trades
     global signal_debounce
+    global ver_pnl, ver_trades, ver_wins, ver_losses
 
     mode_str = "PAPER" if PAPER_TRADE else "LIVE"
     print(f"RSI Bot v11 — Mean-Reversion Scalper (RSI({RSI_PERIOD}) + VWAP σ + ADX) [{mode_str}]")
@@ -1593,7 +1619,7 @@ async def main():
                     pnl_usd, pnl_pct = calc_pnl_from_prices(_s, _e, exit_p)
                     print(f"  REST VERIFY: Phantom {_s} — exchange flat! Clearing.")
                     _x = "🟢" if pnl_usd >= 0 else "🔴"
-                    tg(f"{_x} ${pnl_usd:+.3f} ({pnl_pct*100:+.2f}%)\n{_s.upper()} ${_e:,.0f} → ${exit_p:,.0f} | SL (REST verify)\nDay: ${daily_pnl:.2f} | {wins}W/{losses}L")
+                    tg(f"{_x} ${pnl_usd:+.3f} ({pnl_pct*100:+.2f}%)\n{_s.upper()} ${_e:,.0f} → ${exit_p:,.0f} | SL (REST verify)\nDay: ${daily_pnl:.2f} | {wins}W/{losses}L\n{BOT_VERSION}: ${ver_pnl:+.2f} | {ver_trades}t")
                     handle_exit_pnl(_s, _e, exit_p, "sl_exchange")
                     local_pos.close("rest_verify_flat")
                     do_save_state()
@@ -1645,7 +1671,7 @@ async def main():
                     if PAPER_TRADE:
                         pnl_usd, pnl_pct = handle_exit_pnl(_s, _e, price, "hard_stop", True)
                         _x = "🟢" if pnl_usd >= 0 else "🔴"
-                        tg(f"{_x} {pnl_usd:+.3f} ({pnl_pct*100:+.2f}%)\n{_s.upper()} ${_e:,.0f} → ${price:,.0f} | Hard Stop\nDay: ${daily_pnl:.2f} | {wins}W/{losses}L")
+                        tg(f"{_x} {pnl_usd:+.3f} ({pnl_pct*100:+.2f}%)\n{_s.upper()} ${_e:,.0f} → ${price:,.0f} | Hard Stop\nDay: ${daily_pnl:.2f} | {wins}W/{losses}L\n{BOT_VERSION}: ${ver_pnl:+.2f} | {ver_trades}t")
                         local_pos.close("hard_stop"); last_trade_time = now; unlock_entry()
                     else:
                         success = await close_position(signer, local_pos, "hard_stop", price)
@@ -1654,7 +1680,7 @@ async def main():
                             exit_p = fill["price"] if (fill and time.time() - fill["time"] < 5) else price
                             pnl_usd, pnl_pct = handle_exit_pnl(_s, _e, exit_p, "hard_stop")
                             _x = "🟢" if pnl_usd >= 0 else "🔴"
-                            tg(f"{_x} ${pnl_usd:+.3f} ({pnl_pct*100:+.2f}%)\n{_s.upper()} ${_e:,.0f} → ${exit_p:,.0f} | Hard Stop\nDay: ${daily_pnl:.2f} | {wins}W/{losses}L")
+                            tg(f"{_x} ${pnl_usd:+.3f} ({pnl_pct*100:+.2f}%)\n{_s.upper()} ${_e:,.0f} → ${exit_p:,.0f} | Hard Stop\nDay: ${daily_pnl:.2f} | {wins}W/{losses}L\n{BOT_VERSION}: ${ver_pnl:+.2f} | {ver_trades}t")
                             last_trade_time = now; unlock_entry()
                     do_save_state()
                     await asyncio.sleep(3); continue
@@ -1665,7 +1691,7 @@ async def main():
                     if PAPER_TRADE:
                         pnl_usd, pnl_pct = handle_exit_pnl(_s, _e, local_pos.sl_price, "sl", True)
                         _x = "🟢" if pnl_usd >= 0 else "🔴"
-                        tg(f"{_x} ${pnl_usd:+.3f} ({pnl_pct*100:+.2f}%)\n{_s.upper()} ${_e:,.0f} → ${local_pos.sl_price:,.0f} | SL\nDay: ${daily_pnl:.2f} | {wins}W/{losses}L")
+                        tg(f"{_x} ${pnl_usd:+.3f} ({pnl_pct*100:+.2f}%)\n{_s.upper()} ${_e:,.0f} → ${local_pos.sl_price:,.0f} | SL\nDay: ${daily_pnl:.2f} | {wins}W/{losses}L\n{BOT_VERSION}: ${ver_pnl:+.2f} | {ver_trades}t")
                         local_pos.close("sl"); last_trade_time = now; unlock_entry()
                     elif local_pos.oco_attached:
                         if ws_is_flat():
@@ -1675,7 +1701,7 @@ async def main():
                             await cancel_stale_orders(signer)
                             local_pos.close("sl"); last_trade_time = now; unlock_entry()
                             _x = "🟢" if pnl_usd >= 0 else "🔴"
-                            tg(f"{_x} ${pnl_usd:+.3f} ({pnl_pct*100:+.2f}%)\n{_s.upper()} ${_e:,.0f} → ${exit_p:,.0f} | SL\nDay: ${daily_pnl:.2f} | {wins}W/{losses}L")
+                            tg(f"{_x} ${pnl_usd:+.3f} ({pnl_pct*100:+.2f}%)\n{_s.upper()} ${_e:,.0f} → ${exit_p:,.0f} | SL\nDay: ${daily_pnl:.2f} | {wins}W/{losses}L\n{BOT_VERSION}: ${ver_pnl:+.2f} | {ver_trades}t")
                         else:
                             success = await close_position(signer, local_pos, "fast_sl", price)
                             if success:
@@ -1684,7 +1710,7 @@ async def main():
                                 pnl_usd, pnl_pct = handle_exit_pnl(_s, _e, exit_p, "fast_sl")
                                 last_trade_time = now; unlock_entry()
                                 _x = "🟢" if pnl_usd >= 0 else "🔴"
-                                tg(f"{_x} ${pnl_usd:+.3f} ({pnl_pct*100:+.2f}%)\n{_s.upper()} ${_e:,.0f} → ${exit_p:,.0f} | SL\nDay: ${daily_pnl:.2f} | {wins}W/{losses}L")
+                                tg(f"{_x} ${pnl_usd:+.3f} ({pnl_pct*100:+.2f}%)\n{_s.upper()} ${_e:,.0f} → ${exit_p:,.0f} | SL\nDay: ${daily_pnl:.2f} | {wins}W/{losses}L\n{BOT_VERSION}: ${ver_pnl:+.2f} | {ver_trades}t")
                     else:
                         success = await close_position(signer, local_pos, "local_sl", price)
                         if success:
@@ -1693,7 +1719,7 @@ async def main():
                             pnl_usd, pnl_pct = handle_exit_pnl(_s, _e, exit_p, "local_sl")
                             last_trade_time = now; unlock_entry()
                             _x = "🟢" if pnl_usd >= 0 else "🔴"
-                            tg(f"{_x} ${pnl_usd:+.3f} ({pnl_pct*100:+.2f}%)\n{_s.upper()} ${_e:,.0f} → ${exit_p:,.0f} | SL\nDay: ${daily_pnl:.2f} | {wins}W/{losses}L")
+                            tg(f"{_x} ${pnl_usd:+.3f} ({pnl_pct*100:+.2f}%)\n{_s.upper()} ${_e:,.0f} → ${exit_p:,.0f} | SL\nDay: ${daily_pnl:.2f} | {wins}W/{losses}L\n{BOT_VERSION}: ${ver_pnl:+.2f} | {ver_trades}t")
                     do_save_state()
                     await asyncio.sleep(3); continue
 
@@ -1706,7 +1732,7 @@ async def main():
                     if PAPER_TRADE:
                         pnl_usd, pnl_pct = handle_exit_pnl(_s, _e, price, "trail_exit", True)
                         _x = "🟢" if pnl_usd >= 0 else "🔴"
-                        tg(f"{_x} ${pnl_usd:+.3f} ({pnl_pct*100:+.2f}%)\n{_s.upper()} ${_e:,.0f} → ${price:,.0f} | Trail\nDay: ${daily_pnl:.2f} | {wins}W/{losses}L")
+                        tg(f"{_x} ${pnl_usd:+.3f} ({pnl_pct*100:+.2f}%)\n{_s.upper()} ${_e:,.0f} → ${price:,.0f} | Trail\nDay: ${daily_pnl:.2f} | {wins}W/{losses}L\n{BOT_VERSION}: ${ver_pnl:+.2f} | {ver_trades}t")
                         local_pos.close("trail_exit"); last_trade_time = now; unlock_entry()
                     else:
                         success = await close_position(signer, local_pos, "trail_exit", price)
@@ -1716,7 +1742,7 @@ async def main():
                             pnl_usd, pnl_pct = handle_exit_pnl(_s, _e, exit_p, "trail_exit")
                             last_trade_time = now; unlock_entry()
                             _x = "🟢" if pnl_usd >= 0 else "🔴"
-                            tg(f"{_x} ${pnl_usd:+.3f} ({pnl_pct*100:+.2f}%)\n{_s.upper()} ${_e:,.0f} → ${exit_p:,.0f} | Trail\nDay: ${daily_pnl:.2f} | {wins}W/{losses}L")
+                            tg(f"{_x} ${pnl_usd:+.3f} ({pnl_pct*100:+.2f}%)\n{_s.upper()} ${_e:,.0f} → ${exit_p:,.0f} | Trail\nDay: ${daily_pnl:.2f} | {wins}W/{losses}L\n{BOT_VERSION}: ${ver_pnl:+.2f} | {ver_trades}t")
                     do_save_state()
                     await asyncio.sleep(1); continue
 
@@ -1733,7 +1759,7 @@ async def main():
                     if PAPER_TRADE:
                         pnl_usd, pnl_pct = handle_exit_pnl(_s, _e, price, "tp_exit", True)
                         _x = "🟢" if pnl_usd >= 0 else "🔴"
-                        tg(f"{_x} ${pnl_usd:+.3f} ({pnl_pct*100:+.2f}%)\n{_s.upper()} ${_e:,.0f} → ${price:,.0f} | TP\nDay: ${daily_pnl:.2f} | {wins}W/{losses}L")
+                        tg(f"{_x} ${pnl_usd:+.3f} ({pnl_pct*100:+.2f}%)\n{_s.upper()} ${_e:,.0f} → ${price:,.0f} | TP\nDay: ${daily_pnl:.2f} | {wins}W/{losses}L\n{BOT_VERSION}: ${ver_pnl:+.2f} | {ver_trades}t")
                         local_pos.close("tp_exit"); last_trade_time = now; unlock_entry()
                     else:
                         success = await close_position(signer, local_pos, "tp_exit", price)
@@ -1743,7 +1769,7 @@ async def main():
                             pnl_usd, pnl_pct = handle_exit_pnl(_s, _e, exit_p, "tp_exit")
                             last_trade_time = now; unlock_entry()
                             _x = "🟢" if pnl_usd >= 0 else "🔴"
-                            tg(f"{_x} ${pnl_usd:+.3f} ({pnl_pct*100:+.2f}%)\n{_s.upper()} ${_e:,.0f} → ${exit_p:,.0f} | TP\nDay: ${daily_pnl:.2f} | {wins}W/{losses}L")
+                            tg(f"{_x} ${pnl_usd:+.3f} ({pnl_pct*100:+.2f}%)\n{_s.upper()} ${_e:,.0f} → ${exit_p:,.0f} | TP\nDay: ${daily_pnl:.2f} | {wins}W/{losses}L\n{BOT_VERSION}: ${ver_pnl:+.2f} | {ver_trades}t")
                     do_save_state()
                     await asyncio.sleep(1); continue
 
@@ -1756,7 +1782,7 @@ async def main():
                         if PAPER_TRADE:
                             pnl_usd, pnl_pct = handle_exit_pnl(_s, _e, price, rsi_reason, True)
                             _x = "🟢" if pnl_usd >= 0 else "🔴"
-                            tg(f"{_x} ${pnl_usd:+.3f} ({pnl_pct*100:+.2f}%)\n{_s.upper()} ${_e:,.0f} → ${price:,.0f} | RSI Exit\nDay: ${daily_pnl:.2f} | {wins}W/{losses}L")
+                            tg(f"{_x} ${pnl_usd:+.3f} ({pnl_pct*100:+.2f}%)\n{_s.upper()} ${_e:,.0f} → ${price:,.0f} | RSI Exit\nDay: ${daily_pnl:.2f} | {wins}W/{losses}L\n{BOT_VERSION}: ${ver_pnl:+.2f} | {ver_trades}t")
                             local_pos.close(rsi_reason); last_trade_time = now; unlock_entry()
                         else:
                             success = await close_position(signer, local_pos, rsi_reason, price)
@@ -1766,7 +1792,7 @@ async def main():
                                 pnl_usd, pnl_pct = handle_exit_pnl(_s, _e, exit_p, rsi_reason)
                                 last_trade_time = now; unlock_entry()
                                 _x = "🟢" if pnl_usd >= 0 else "🔴"
-                                tg(f"{_x} ${pnl_usd:+.3f} ({pnl_pct*100:+.2f}%)\n{_s.upper()} ${_e:,.0f} → ${exit_p:,.0f} | RSI Exit\nDay: ${daily_pnl:.2f} | {wins}W/{losses}L")
+                                tg(f"{_x} ${pnl_usd:+.3f} ({pnl_pct*100:+.2f}%)\n{_s.upper()} ${_e:,.0f} → ${exit_p:,.0f} | RSI Exit\nDay: ${daily_pnl:.2f} | {wins}W/{losses}L\n{BOT_VERSION}: ${ver_pnl:+.2f} | {ver_trades}t")
                         do_save_state()
                         await asyncio.sleep(1); continue
 
@@ -1777,7 +1803,7 @@ async def main():
                     if PAPER_TRADE:
                         pnl_usd, pnl_pct = handle_exit_pnl(_s, _e, price, "time_exit", True)
                         _x = "🟢" if pnl_usd >= 0 else "🔴"
-                        tg(f"{_x} ${pnl_usd:+.3f} ({pnl_pct*100:+.2f}%)\n{_s.upper()} ${_e:,.0f} → ${price:,.0f} | Time Exit\nDay: ${daily_pnl:.2f} | {wins}W/{losses}L")
+                        tg(f"{_x} ${pnl_usd:+.3f} ({pnl_pct*100:+.2f}%)\n{_s.upper()} ${_e:,.0f} → ${price:,.0f} | Time Exit\nDay: ${daily_pnl:.2f} | {wins}W/{losses}L\n{BOT_VERSION}: ${ver_pnl:+.2f} | {ver_trades}t")
                         local_pos.close("time_exit"); last_trade_time = now; unlock_entry()
                     else:
                         success = await close_position(signer, local_pos, "time_exit", price)
@@ -1787,7 +1813,7 @@ async def main():
                             pnl_usd, pnl_pct = handle_exit_pnl(_s, _e, exit_p, "time_exit")
                             last_trade_time = now; unlock_entry()
                             _x = "🟢" if pnl_usd >= 0 else "🔴"
-                            tg(f"{_x} ${pnl_usd:+.3f} ({pnl_pct*100:+.2f}%)\n{_s.upper()} ${_e:,.0f} → ${exit_p:,.0f} | Time Exit\nDay: ${daily_pnl:.2f} | {wins}W/{losses}L")
+                            tg(f"{_x} ${pnl_usd:+.3f} ({pnl_pct*100:+.2f}%)\n{_s.upper()} ${_e:,.0f} → ${exit_p:,.0f} | Time Exit\nDay: ${daily_pnl:.2f} | {wins}W/{losses}L\n{BOT_VERSION}: ${ver_pnl:+.2f} | {ver_trades}t")
                     do_save_state()
                     await asyncio.sleep(1); continue
                 else:
