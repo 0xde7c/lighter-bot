@@ -25,7 +25,7 @@ PAPER_TRADE = False
 PAPER_STARTING_BALANCE = 71.30
 
 # ── VERSION ──────────────────────────────────────────────────────────────
-BOT_VERSION = "v11.1"          # bump this on every meaningful change
+BOT_VERSION = "v11.2"          # bump this on every meaningful change
 
 # ── CONFIG ───────────────────────────────────────────────────────────────
 ACCOUNT_INDEX=716892; API_KEY_INDEX=3
@@ -48,7 +48,7 @@ EMA_OVERRIDE_LONG = 30          # RSI below this bypasses EMA block for longs
 EMA_OVERRIDE_SHORT = 75         # RSI above this bypasses EMA block for shorts
 
 # RSI turning: confirms reversal from trough/peak
-RSI_TURN_DELTA = 2.0           # min RSI rise from trough (long) or fall from peak (short)
+RSI_TURN_DELTA = 3.0           # min RSI rise from trough (long) or fall from peak (short)
 RSI_TURN_WINDOW = 120          # seconds to look back for trough/peak
 
 # RSI-based exits — profit only
@@ -100,8 +100,8 @@ TRAIL_MAX_HOLD_SECS = 330      # 5.5 min trailing (was 450)
 LOCK_DURATION = 450
 
 # ── COOLDOWNS ────────────────────────────────────────────────────────────
-MIN_TRADE_INTERVAL = 45        # 45s between trades
-LOSS_COOLDOWN_SECS = 60        # pause after loss
+MIN_TRADE_INTERVAL = 90        # 90s between trades
+LOSS_COOLDOWN_SECS = 180       # 3 min pause after loss
 LOSS_STREAK_COOLDOWN = 600     # 10 min after 2 losses (was 300s after 3)
 MAX_TRADES_HOUR = 8            # reduced from 15 (tighter filters = fewer, better trades)
 DAILY_LOSS_LIMIT = 2.0
